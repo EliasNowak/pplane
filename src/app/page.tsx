@@ -16,6 +16,7 @@ type Trajectory = {
   x0: number;
   y0: number;
   color: string;
+  startedAtMs: number;
 };
 
 type Preset = {
@@ -83,6 +84,7 @@ type PersistedAppState = {
   showEquilibria: boolean;
   showEigenSpaces: boolean;
   showField: boolean;
+  showTrajectoryAnimation: boolean;
   vectorDensity: number;
   stepSize: number;
   steps: number;
@@ -138,6 +140,8 @@ const PRESETS: Preset[] = [
 const TRAJECTORY_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c"];
 const NO_PRESET = "__none__";
 const SESSION_STORAGE_KEY = "pplane-modern-state-v1";
+const TRAJECTORY_TIME_SCALE = 1.4;
+const MAX_SIMULTANEOUS_ANIMATIONS = 5;
 
 function dedupePoints(points: Array<{ x: number; y: number }>, tolerance = 0.2) {
   const result: Array<{ x: number; y: number }> = [];
@@ -246,6 +250,7 @@ export default function Home() {
   const [showEquilibria, setShowEquilibria] = useState(true);
   const [showEigenSpaces, setShowEigenSpaces] = useState(true);
   const [showField, setShowField] = useState(true);
+  const [showTrajectoryAnimation, setShowTrajectoryAnimation] = useState(true);
   const [vectorDensity, setVectorDensity] = useState(23);
   const [stepSize, setStepSize] = useState(0.03);
   const [steps, setSteps] = useState(1200);
@@ -607,247 +612,407 @@ export default function Home() {
     const toWorldY = (py: number) => yMin + ((height - py) / height) * (yMax - yMin);
 
     const integrate = (x0: number, y0: number, direction: 1 | -1) => {
-      const points: Array<{ x: number; y: number }> = [{ x: x0, y: y0 }];
+      const points: Array<{ x: number; y: number; t: number }> = [{ x: x0, y: y0, t: 0 }];
       let x = x0;
       let y = y0;
+      let t = 0;
 
       for (let index = 0; index < steps; index += 1) {
-        const h = stepSize * direction;
+        const hSigned = stepSize * direction;
 
         const k1 = field(x, y);
-        const k2 = field(x + (h * k1.dx) / 2, y + (h * k1.dy) / 2);
-        const k3 = field(x + (h * k2.dx) / 2, y + (h * k2.dy) / 2);
-        const k4 = field(x + h * k3.dx, y + h * k3.dy);
+        const k2 = field(x + (hSigned * k1.dx) / 2, y + (hSigned * k1.dy) / 2);
+        const k3 = field(x + (hSigned * k2.dx) / 2, y + (hSigned * k2.dy) / 2);
+        const k4 = field(x + hSigned * k3.dx, y + hSigned * k3.dy);
 
         if (!k1.valid || !k2.valid || !k3.valid || !k4.valid) {
           break;
         }
 
-        x += (h / 6) * (k1.dx + 2 * k2.dx + 2 * k3.dx + k4.dx);
-        y += (h / 6) * (k1.dy + 2 * k2.dy + 2 * k3.dy + k4.dy);
+        x += (hSigned / 6) * (k1.dx + 2 * k2.dx + 2 * k3.dx + k4.dx);
+        y += (hSigned / 6) * (k1.dy + 2 * k2.dy + 2 * k3.dy + k4.dy);
+        t += stepSize;
 
         if (x < xMin - 1 || x > xMax + 1 || y < yMin - 1 || y > yMax + 1) {
           break;
         }
 
-        points.push({ x, y });
+        points.push({ x, y, t });
       }
 
       return points;
     };
 
-    context.clearRect(0, 0, width, height);
-    context.fillStyle = "#ffffff";
-    context.fillRect(0, 0, width, height);
+    const interpolateAtTime = (
+      points: Array<{ x: number; y: number; t: number }>,
+      targetTime: number,
+    ) => {
+      if (points.length === 0) {
+        return null;
+      }
 
-    context.strokeStyle = "#e5e7eb";
-    context.lineWidth = 1;
-    const integerLimit = Math.ceil(domain);
-    for (let value = -integerLimit; value <= integerLimit; value += 1) {
-      const x = toCanvasX(value);
-      const y = toCanvasY(value);
-      context.beginPath();
-      context.moveTo(x, 0);
-      context.lineTo(x, height);
-      context.stroke();
-      context.beginPath();
-      context.moveTo(0, y);
-      context.lineTo(width, y);
-      context.stroke();
-    }
+      if (targetTime <= 0 || points.length === 1) {
+        return points[0];
+      }
 
-    context.strokeStyle = "#9ca3af";
-    context.lineWidth = 1.2;
-    context.beginPath();
-    context.moveTo(toCanvasX(0), 0);
-    context.lineTo(toCanvasX(0), height);
-    context.stroke();
-    context.beginPath();
-    context.moveTo(0, toCanvasY(0));
-    context.lineTo(width, toCanvasY(0));
-    context.stroke();
+      const last = points[points.length - 1];
+      if (targetTime >= last.t) {
+        return last;
+      }
 
-    if (showField) {
-      context.strokeStyle = "rgba(31, 41, 55, 0.65)";
-      context.fillStyle = "rgba(31, 41, 55, 0.65)";
-      for (let row = 0; row <= vectorDensity; row += 1) {
-        for (let col = 0; col <= vectorDensity; col += 1) {
-          const x = xMin + (col / vectorDensity) * (xMax - xMin);
-          const y = yMin + (row / vectorDensity) * (yMax - yMin);
-          const { dx, dy, valid } = field(x, y);
-          if (!valid) {
-            continue;
-          }
-          const length = Math.hypot(dx, dy);
-          if (length < 1e-7) {
-            continue;
-          }
-          const ux = dx / length;
-          const uy = dy / length;
-          const arrowScale = ((xMax - xMin) / vectorDensity) * 0.35;
-          const x1 = x - (ux * arrowScale) / 2;
-          const y1 = y - (uy * arrowScale) / 2;
-          const x2 = x + (ux * arrowScale) / 2;
-          const y2 = y + (uy * arrowScale) / 2;
-
-          const px1 = toCanvasX(x1);
-          const py1 = toCanvasY(y1);
-          const px2 = toCanvasX(x2);
-          const py2 = toCanvasY(y2);
-
-          context.lineWidth = 1;
-          context.beginPath();
-          context.moveTo(px1, py1);
-          context.lineTo(px2, py2);
-          context.stroke();
-
-          const arrowHead = 3.5;
-          const angle = Math.atan2(py2 - py1, px2 - px1);
-          context.beginPath();
-          context.moveTo(px2, py2);
-          context.lineTo(
-            px2 - arrowHead * Math.cos(angle - Math.PI / 6),
-            py2 - arrowHead * Math.sin(angle - Math.PI / 6),
-          );
-          context.lineTo(
-            px2 - arrowHead * Math.cos(angle + Math.PI / 6),
-            py2 - arrowHead * Math.sin(angle + Math.PI / 6),
-          );
-          context.closePath();
-          context.fill();
+      for (let index = 1; index < points.length; index += 1) {
+        const previous = points[index - 1];
+        const current = points[index];
+        if (targetTime <= current.t) {
+          const dt = current.t - previous.t;
+          const ratio = dt <= 1e-12 ? 0 : (targetTime - previous.t) / dt;
+          return {
+            x: previous.x + (current.x - previous.x) * ratio,
+            y: previous.y + (current.y - previous.y) * ratio,
+            t: targetTime,
+          };
         }
       }
-    }
 
-    if (showEquilibria) {
-      for (const point of equilibria) {
-        const isHovered =
-          hoveredEquilibrium !== null && Math.hypot(point.x - hoveredEquilibrium.x, point.y - hoveredEquilibrium.y) < 1e-9;
-        const isSelected =
-          selectedEquilibrium !== null && Math.hypot(point.x - selectedEquilibrium.x, point.y - selectedEquilibrium.y) < 1e-9;
+      return last;
+    };
 
-        if (isSelected || isHovered) {
-          context.fillStyle = isHovered ? "#ef4444" : "#991b1b";
-          context.beginPath();
-          context.arc(toCanvasX(point.x), toCanvasY(point.y), 6, 0, 2 * Math.PI);
-          context.fill();
-        }
+    let animationFrameId: number | null = null;
+    let disposed = false;
 
-        context.fillStyle = "#dc2626";
+    const drawScene = () => {
+      if (disposed) {
+        return;
+      }
+
+      const nowMs = performance.now();
+
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, width, height);
+
+      context.strokeStyle = "#e5e7eb";
+      context.lineWidth = 1;
+      const integerLimit = Math.ceil(domain);
+      for (let value = -integerLimit; value <= integerLimit; value += 1) {
+        const x = toCanvasX(value);
+        const y = toCanvasY(value);
         context.beginPath();
-        context.arc(toCanvasX(point.x), toCanvasY(point.y), 4, 0, 2 * Math.PI);
-        context.fill();
+        context.moveTo(x, 0);
+        context.lineTo(x, height);
+        context.stroke();
+        context.beginPath();
+        context.moveTo(0, y);
+        context.lineTo(width, y);
+        context.stroke();
       }
-    }
 
-    if (showEigenSpaces && equilibria.length > 0) {
-      const span = (xMax - xMin) * 2;
-      const eps = 1e-8;
-      const h = Math.max(domain * 1e-4, 1e-5);
+      context.strokeStyle = "#9ca3af";
+      context.lineWidth = 1.2;
+      context.beginPath();
+      context.moveTo(toCanvasX(0), 0);
+      context.lineTo(toCanvasX(0), height);
+      context.stroke();
+      context.beginPath();
+      context.moveTo(0, toCanvasY(0));
+      context.lineTo(width, toCanvasY(0));
+      context.stroke();
 
-      const getEigenDirectionsForPoint = (point: EquilibriumPoint) => {
-        const fxPlus = field(point.x + h, point.y);
-        const fxMinus = field(point.x - h, point.y);
-        const fyPlus = field(point.x, point.y + h);
-        const fyMinus = field(point.x, point.y - h);
+      if (showField) {
+        context.strokeStyle = "rgba(31, 41, 55, 0.65)";
+        context.fillStyle = "rgba(31, 41, 55, 0.65)";
+        for (let row = 0; row <= vectorDensity; row += 1) {
+          for (let col = 0; col <= vectorDensity; col += 1) {
+            const x = xMin + (col / vectorDensity) * (xMax - xMin);
+            const y = yMin + (row / vectorDensity) * (yMax - yMin);
+            const { dx, dy, valid } = field(x, y);
+            if (!valid) {
+              continue;
+            }
+            const length = Math.hypot(dx, dy);
+            if (length < 1e-7) {
+              continue;
+            }
+            const ux = dx / length;
+            const uy = dy / length;
+            const arrowScale = ((xMax - xMin) / vectorDensity) * 0.35;
+            const x1 = x - (ux * arrowScale) / 2;
+            const y1 = y - (uy * arrowScale) / 2;
+            const x2 = x + (ux * arrowScale) / 2;
+            const y2 = y + (uy * arrowScale) / 2;
 
-        if (!fxPlus.valid || !fxMinus.valid || !fyPlus.valid || !fyMinus.valid) {
-          return [] as Array<{ x: number; y: number; eigenvalue: number }>;
-        }
+            const px1 = toCanvasX(x1);
+            const py1 = toCanvasY(y1);
+            const px2 = toCanvasX(x2);
+            const py2 = toCanvasY(y2);
 
-        const j11 = (fxPlus.dx - fxMinus.dx) / (2 * h);
-        const j21 = (fxPlus.dy - fxMinus.dy) / (2 * h);
-        const j12 = (fyPlus.dx - fyMinus.dx) / (2 * h);
-        const j22 = (fyPlus.dy - fyMinus.dy) / (2 * h);
+            context.lineWidth = 1;
+            context.beginPath();
+            context.moveTo(px1, py1);
+            context.lineTo(px2, py2);
+            context.stroke();
 
-        const trace = j11 + j22;
-        const determinant = j11 * j22 - j12 * j21;
-        const discriminant = trace * trace - 4 * determinant;
-        if (discriminant < -eps) {
-          return [] as Array<{ x: number; y: number; eigenvalue: number }>;
-        }
-
-        const sqrtDisc = Math.sqrt(Math.max(0, discriminant));
-        const lambda1 = (trace + sqrtDisc) / 2;
-        const lambda2 = (trace - sqrtDisc) / 2;
-        const directions: Array<{ x: number; y: number; eigenvalue: number }> = [];
-
-        const direction1 = computeEigenDirection(j11, j12, j21, j22, lambda1);
-        if (direction1) {
-          directions.push({ x: direction1.x, y: direction1.y, eigenvalue: lambda1 });
-        }
-
-        if (Math.abs(lambda2 - lambda1) > eps) {
-          const direction2 = computeEigenDirection(j11, j12, j21, j22, lambda2);
-          if (direction2) {
-            const duplicate = directions.some(
-              (candidate) => Math.abs(candidate.x * direction2.y - candidate.y * direction2.x) < 1e-5,
+            const arrowHead = 3.5;
+            const angle = Math.atan2(py2 - py1, px2 - px1);
+            context.beginPath();
+            context.moveTo(px2, py2);
+            context.lineTo(
+              px2 - arrowHead * Math.cos(angle - Math.PI / 6),
+              py2 - arrowHead * Math.sin(angle - Math.PI / 6),
             );
-            if (!duplicate) {
-              directions.push({ x: direction2.x, y: direction2.y, eigenvalue: lambda2 });
+            context.lineTo(
+              px2 - arrowHead * Math.cos(angle + Math.PI / 6),
+              py2 - arrowHead * Math.sin(angle + Math.PI / 6),
+            );
+            context.closePath();
+            context.fill();
+          }
+        }
+      }
+
+      if (showEquilibria) {
+        for (const point of equilibria) {
+          const isHovered =
+            hoveredEquilibrium !== null && Math.hypot(point.x - hoveredEquilibrium.x, point.y - hoveredEquilibrium.y) < 1e-9;
+          const isSelected =
+            selectedEquilibrium !== null && Math.hypot(point.x - selectedEquilibrium.x, point.y - selectedEquilibrium.y) < 1e-9;
+
+          if (isSelected || isHovered) {
+            context.fillStyle = isHovered ? "#ef4444" : "#991b1b";
+            context.beginPath();
+            context.arc(toCanvasX(point.x), toCanvasY(point.y), 6, 0, 2 * Math.PI);
+            context.fill();
+          }
+
+          context.fillStyle = "#dc2626";
+          context.beginPath();
+          context.arc(toCanvasX(point.x), toCanvasY(point.y), 4, 0, 2 * Math.PI);
+          context.fill();
+        }
+      }
+
+      if (showEigenSpaces && equilibria.length > 0) {
+        const span = (xMax - xMin) * 2;
+        const eps = 1e-8;
+        const h = Math.max(domain * 1e-4, 1e-5);
+
+        const getEigenDirectionsForPoint = (point: EquilibriumPoint) => {
+          const fxPlus = field(point.x + h, point.y);
+          const fxMinus = field(point.x - h, point.y);
+          const fyPlus = field(point.x, point.y + h);
+          const fyMinus = field(point.x, point.y - h);
+
+          if (!fxPlus.valid || !fxMinus.valid || !fyPlus.valid || !fyMinus.valid) {
+            return [] as Array<{ x: number; y: number; eigenvalue: number }>;
+          }
+
+          const j11 = (fxPlus.dx - fxMinus.dx) / (2 * h);
+          const j21 = (fxPlus.dy - fxMinus.dy) / (2 * h);
+          const j12 = (fyPlus.dx - fyMinus.dx) / (2 * h);
+          const j22 = (fyPlus.dy - fyMinus.dy) / (2 * h);
+
+          const trace = j11 + j22;
+          const determinant = j11 * j22 - j12 * j21;
+          const discriminant = trace * trace - 4 * determinant;
+          if (discriminant < -eps) {
+            return [] as Array<{ x: number; y: number; eigenvalue: number }>;
+          }
+
+          const sqrtDisc = Math.sqrt(Math.max(0, discriminant));
+          const lambda1 = (trace + sqrtDisc) / 2;
+          const lambda2 = (trace - sqrtDisc) / 2;
+          const directions: Array<{ x: number; y: number; eigenvalue: number }> = [];
+
+          const direction1 = computeEigenDirection(j11, j12, j21, j22, lambda1);
+          if (direction1) {
+            directions.push({ x: direction1.x, y: direction1.y, eigenvalue: lambda1 });
+          }
+
+          if (Math.abs(lambda2 - lambda1) > eps) {
+            const direction2 = computeEigenDirection(j11, j12, j21, j22, lambda2);
+            if (direction2) {
+              const duplicate = directions.some(
+                (candidate) => Math.abs(candidate.x * direction2.y - candidate.y * direction2.x) < 1e-5,
+              );
+              if (!duplicate) {
+                directions.push({ x: direction2.x, y: direction2.y, eigenvalue: lambda2 });
+              }
             }
           }
+
+          return directions;
+        };
+
+        for (const point of equilibria) {
+          const directions = getEigenDirectionsForPoint(point);
+          const isActivePoint =
+            activeEquilibrium !== null && Math.hypot(point.x - activeEquilibrium.x, point.y - activeEquilibrium.y) < 1e-9;
+
+          directions.forEach((direction, index) => {
+            context.strokeStyle = index % 2 === 0 ? "rgba(59, 130, 246, 0.9)" : "rgba(234, 88, 12, 0.9)";
+            context.lineWidth = isActivePoint ? 2.1 : 1.4;
+            context.setLineDash([6, 4]);
+            context.beginPath();
+            context.moveTo(
+              toCanvasX(point.x - direction.x * span),
+              toCanvasY(point.y - direction.y * span),
+            );
+            context.lineTo(
+              toCanvasX(point.x + direction.x * span),
+              toCanvasY(point.y + direction.y * span),
+            );
+            context.stroke();
+            context.setLineDash([]);
+
+            if (isActivePoint) {
+              const labelX = toCanvasX(point.x + direction.x * (span * 0.25));
+              const labelY = toCanvasY(point.y + direction.y * (span * 0.25));
+              context.fillStyle = "#1f2937";
+              context.font = "11px sans-serif";
+              context.fillText(`λ=${formatNumber(direction.eigenvalue, 2)}`, labelX + 4, labelY - 4);
+            }
+          });
+        }
+      }
+
+      let hasActiveAnimation = false;
+      trajectories.forEach((trajectory) => {
+        const forward = integrate(trajectory.x0, trajectory.y0, 1);
+        if (forward.length === 0) {
+          return;
         }
 
-        return directions;
-      };
+        if (!showTrajectoryAnimation) {
+          const backward = integrate(trajectory.x0, trajectory.y0, -1);
+          const fullPath = [...backward.reverse(), ...forward];
 
-      for (const point of equilibria) {
-        const directions = getEigenDirectionsForPoint(point);
-        const isActivePoint =
-          activeEquilibrium !== null && Math.hypot(point.x - activeEquilibrium.x, point.y - activeEquilibrium.y) < 1e-9;
-
-        directions.forEach((direction, index) => {
-          context.strokeStyle = index % 2 === 0 ? "rgba(59, 130, 246, 0.9)" : "rgba(234, 88, 12, 0.9)";
-          context.lineWidth = isActivePoint ? 2.1 : 1.4;
-          context.setLineDash([6, 4]);
+          context.strokeStyle = trajectory.color;
+          context.lineWidth = 2.4;
           context.beginPath();
-          context.moveTo(
-            toCanvasX(point.x - direction.x * span),
-            toCanvasY(point.y - direction.y * span),
-          );
-          context.lineTo(
-            toCanvasX(point.x + direction.x * span),
-            toCanvasY(point.y + direction.y * span),
-          );
+          fullPath.forEach((point, index) => {
+            const cx = toCanvasX(point.x);
+            const cy = toCanvasY(point.y);
+            if (index === 0) {
+              context.moveTo(cx, cy);
+            } else {
+              context.lineTo(cx, cy);
+            }
+          });
           context.stroke();
-          context.setLineDash([]);
 
-          if (isActivePoint) {
-            const labelX = toCanvasX(point.x + direction.x * (span * 0.25));
-            const labelY = toCanvasY(point.y + direction.y * (span * 0.25));
-            context.fillStyle = "#1f2937";
-            context.font = "11px sans-serif";
-            context.fillText(`λ=${formatNumber(direction.eigenvalue, 2)}`, labelX + 4, labelY - 4);
+          context.fillStyle = trajectory.color;
+          context.beginPath();
+          context.arc(toCanvasX(trajectory.x0), toCanvasY(trajectory.y0), 3.8, 0, 2 * Math.PI);
+          context.fill();
+          return;
+        }
+
+        const lastPoint = forward[forward.length - 1];
+        const elapsedModelTime = Math.max(0, ((nowMs - trajectory.startedAtMs) / 1000) * TRAJECTORY_TIME_SCALE);
+        const visibleModelTime = Math.min(elapsedModelTime, lastPoint.t);
+        if (visibleModelTime < lastPoint.t - 1e-6) {
+          hasActiveAnimation = true;
+        }
+
+        const visiblePoints: Array<{ x: number; y: number }> = [];
+        for (let index = 0; index < forward.length; index += 1) {
+          const point = forward[index];
+          if (point.t <= visibleModelTime) {
+            visiblePoints.push({ x: point.x, y: point.y });
+          } else {
+            break;
           }
-        });
-      }
-    }
+        }
 
-    trajectories.forEach((trajectory) => {
-      const forward = integrate(trajectory.x0, trajectory.y0, 1);
-      const backward = integrate(trajectory.x0, trajectory.y0, -1);
-      const fullPath = [...backward.reverse(), ...forward];
+        const movingPoint = interpolateAtTime(forward, visibleModelTime);
+        if (movingPoint) {
+          const lastVisiblePoint = visiblePoints[visiblePoints.length - 1];
+          if (
+            !lastVisiblePoint ||
+            Math.hypot(lastVisiblePoint.x - movingPoint.x, lastVisiblePoint.y - movingPoint.y) > 1e-8
+          ) {
+            visiblePoints.push({ x: movingPoint.x, y: movingPoint.y });
+          }
+        }
 
-      context.strokeStyle = trajectory.color;
-      context.lineWidth = 2;
-      context.beginPath();
-      fullPath.forEach((point, index) => {
-        const cx = toCanvasX(point.x);
-        const cy = toCanvasY(point.y);
-        if (index === 0) {
-          context.moveTo(cx, cy);
-        } else {
-          context.lineTo(cx, cy);
+        if (visiblePoints.length >= 2) {
+          context.strokeStyle = trajectory.color;
+          context.lineWidth = 2.4;
+          context.beginPath();
+          visiblePoints.forEach((point, index) => {
+            const cx = toCanvasX(point.x);
+            const cy = toCanvasY(point.y);
+            if (index === 0) {
+              context.moveTo(cx, cy);
+            } else {
+              context.lineTo(cx, cy);
+            }
+          });
+          context.stroke();
+        }
+
+        if (movingPoint) {
+          const velocity = field(movingPoint.x, movingPoint.y);
+          if (velocity.valid) {
+            const speed = Math.hypot(velocity.dx, velocity.dy);
+            if (speed > 1e-10) {
+              const ux = velocity.dx / speed;
+              const uy = velocity.dy / speed;
+              const dynamicScale = Math.min(3.4, 0.22 + speed * 0.55);
+              const arrowLengthWorld = ((xMax - xMin) / 22) * dynamicScale;
+              const arrowTailX = movingPoint.x;
+              const arrowTailY = movingPoint.y;
+              const arrowHeadX = movingPoint.x + ux * arrowLengthWorld;
+              const arrowHeadY = movingPoint.y + uy * arrowLengthWorld;
+
+              const pxTail = toCanvasX(arrowTailX);
+              const pyTail = toCanvasY(arrowTailY);
+              const pxHead = toCanvasX(arrowHeadX);
+              const pyHead = toCanvasY(arrowHeadY);
+
+              context.strokeStyle = trajectory.color;
+              context.fillStyle = trajectory.color;
+              context.lineWidth = 2;
+              context.beginPath();
+              context.moveTo(pxTail, pyTail);
+              context.lineTo(pxHead, pyHead);
+              context.stroke();
+
+              const headSize = 9;
+              const angle = Math.atan2(pyHead - pyTail, pxHead - pxTail);
+              context.beginPath();
+              context.moveTo(pxHead, pyHead);
+              context.lineTo(
+                pxHead - headSize * Math.cos(angle - Math.PI / 7),
+                pyHead - headSize * Math.sin(angle - Math.PI / 7),
+              );
+              context.lineTo(
+                pxHead - headSize * Math.cos(angle + Math.PI / 7),
+                pyHead - headSize * Math.sin(angle + Math.PI / 7),
+              );
+              context.closePath();
+              context.fill();
+            }
+          }
+
+          context.fillStyle = trajectory.color;
+          context.beginPath();
+          context.arc(toCanvasX(movingPoint.x), toCanvasY(movingPoint.y), 6, 0, 2 * Math.PI);
+          context.fill();
+
+          context.fillStyle = "#ffffff";
+          context.beginPath();
+          context.arc(toCanvasX(movingPoint.x), toCanvasY(movingPoint.y), 2.2, 0, 2 * Math.PI);
+          context.fill();
         }
       });
-      context.stroke();
 
-      context.fillStyle = trajectory.color;
-      context.beginPath();
-      context.arc(toCanvasX(trajectory.x0), toCanvasY(trajectory.y0), 3.5, 0, 2 * Math.PI);
-      context.fill();
-    });
+      if (hasActiveAnimation) {
+        animationFrameId = window.requestAnimationFrame(drawScene);
+      }
+    };
+
+    drawScene();
 
     const getNearestEquilibrium = (event: MouseEvent) => {
       if (!showEquilibria || equilibria.length === 0) {
@@ -896,8 +1061,19 @@ export default function Home() {
       const x = toWorldX((px / rect.width) * width);
       const y = toWorldY((py / rect.height) * height);
       setTrajectories((previous) => {
+        if (showTrajectoryAnimation) {
+          const nowMs = performance.now();
+          const maxAnimationDurationMs = ((steps * stepSize) / TRAJECTORY_TIME_SCALE) * 1000;
+          const activeAnimationCount = previous.filter(
+            (trajectory) => nowMs - trajectory.startedAtMs < maxAnimationDurationMs,
+          ).length;
+          if (activeAnimationCount >= MAX_SIMULTANEOUS_ANIMATIONS) {
+            return previous;
+          }
+        }
+
         const color = TRAJECTORY_COLORS[previous.length % TRAJECTORY_COLORS.length];
-        return [...previous, { x0: x, y0: y, color }];
+        return [...previous, { x0: x, y0: y, color, startedAtMs: performance.now() }];
       });
     };
 
@@ -906,6 +1082,10 @@ export default function Home() {
     canvas.addEventListener("mouseleave", leaveHandler);
     canvas.addEventListener("click", clickHandler);
     return () => {
+      disposed = true;
+      if (animationFrameId !== null) {
+        window.cancelAnimationFrame(animationFrameId);
+      }
       canvas.removeEventListener("mousemove", moveHandler);
       canvas.removeEventListener("mouseleave", leaveHandler);
       canvas.removeEventListener("click", clickHandler);
@@ -921,6 +1101,7 @@ export default function Home() {
     showEigenSpaces,
     showEquilibria,
     showField,
+    showTrajectoryAnimation,
     stepSize,
     steps,
     trajectories,
@@ -1149,6 +1330,9 @@ export default function Home() {
         if (typeof parsed.showField === "boolean") {
           setShowField(parsed.showField);
         }
+        if (typeof parsed.showTrajectoryAnimation === "boolean") {
+          setShowTrajectoryAnimation(parsed.showTrajectoryAnimation);
+        }
         if (typeof parsed.vectorDensity === "number" && Number.isFinite(parsed.vectorDensity)) {
           setVectorDensity(parsed.vectorDensity);
         }
@@ -1222,6 +1406,7 @@ export default function Home() {
       showEquilibria,
       showEigenSpaces,
       showField,
+      showTrajectoryAnimation,
       vectorDensity,
       stepSize,
       steps,
@@ -1246,6 +1431,7 @@ export default function Home() {
     showEquilibria,
     showEigenSpaces,
     showField,
+    showTrajectoryAnimation,
     stepSize,
     steps,
     vectorDensity,
@@ -1257,7 +1443,7 @@ export default function Home() {
         <section className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-zinc-200">
           <h1 className="text-2xl font-semibold tracking-tight">PPlane Modern</h1>
           <p className="mt-1 text-sm text-zinc-600">
-            Interaktives Phasenporträt für 2D-Systeme. Klick im Plot setzt Startpunkte für Trajektorien.
+            Interaktives Phasenporträt für 2D-Systeme. Klick im Plot startet eine animierte Trajektorie mit Live-Geschwindigkeitsvektor.
           </p>
 
           <div className="mt-4 grid gap-3">
@@ -1500,6 +1686,14 @@ export default function Home() {
                 />
                 Eigenräume
               </label>
+              <label className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={showTrajectoryAnimation}
+                  onChange={(event) => setShowTrajectoryAnimation(event.target.checked)}
+                />
+                Trajektorie animieren
+              </label>
             </div>
 
             <button
@@ -1563,7 +1757,7 @@ export default function Home() {
             <h2 className="text-lg font-semibold">Phasenebene</h2>
             <div className="flex items-center gap-3">
               <span className="text-xs text-zinc-500">
-                Hover/Klick auf Gleichgewicht = Analyse, sonst Klick = Trajektorie
+                Hover/Klick auf Gleichgewicht = Analyse, sonst Klick = animierte Trajektorie
               </span>
               <button
                 type="button"
@@ -1590,6 +1784,9 @@ export default function Home() {
           </div>
           <p className="mt-2 text-xs text-zinc-500">
             Zeitplots basieren auf der zuletzt gesetzten Trajektorie im Hauptplot.
+          </p>
+          <p className="mt-1 text-xs text-zinc-500">
+            Bei aktiver Animation sind maximal {MAX_SIMULTANEOUS_ANIMATIONS} gleichzeitig laufende Trajektorien erlaubt.
           </p>
         </section>
       </div>
